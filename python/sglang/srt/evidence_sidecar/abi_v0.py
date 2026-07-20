@@ -48,6 +48,11 @@ def hash_token_ids(token_ids: Iterable[int]) -> bytes:
     return hash_bytes(b"".join(struct.pack("<q", token) for token in values))
 
 
+def stable_run_id(session_id: str, request_id: str) -> tuple[int, int]:
+    digest = hash_bytes(f"{session_id}\0{request_id}".encode("utf-8"))
+    return int.from_bytes(digest[:8], "little"), int.from_bytes(digest[8:16], "little")
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalEventV0:
     run_id_lo: int
@@ -112,7 +117,10 @@ def compute_chain_root(
 
 
 def make_record(
-    *, event: CanonicalEventV0, label: str, prev_tip: bytes,
+    *,
+    event: CanonicalEventV0,
+    label: str,
+    prev_tip: bytes,
     domain: int = EVIDENCE_DOMAIN_TILE_SUMMARY,
     extensions: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -148,6 +156,13 @@ def make_record(
         "first_sequence_id": event.sequence_id,
         "last_sequence_id": event.sequence_id,
         "evidence_root": root.hex(),
+        "model_id_hash": event.model_id_hash.hex(),
+        "sampler_config_hash": event.sampler_config_hash.hex(),
+        "input_context_tip": event.input_context_tip.hex(),
+        "output_token_hash": event.output_token_hash.hex(),
+        "sampling_metadata_hash": event.sampling_metadata_hash.hex(),
+        "tool_call_payload_hash": event.tool_call_payload_hash.hex(),
+        "runtime_policy_hash": event.runtime_policy_hash.hex(),
     }
     if extensions:
         record.update(extensions)
@@ -159,6 +174,7 @@ def verify_records(records: Iterable[Mapping[str, object]]) -> dict[str, object]
     prev_tip = ZERO_ROOT
     run_id = None
     count = 0
+    identity = None
     for record in records:
         if record.get("schema") != "smoke_attestation_transcript_v0":
             raise ValueError("unsupported transcript schema")
@@ -175,7 +191,41 @@ def verify_records(records: Iterable[Mapping[str, object]]) -> dict[str, object]
             raise ValueError("run id changed")
         if bytes.fromhex(str(record["prev_tip"])) != prev_tip:
             raise ValueError("previous tip mismatch")
+        event = CanonicalEventV0(
+            run_id_lo=current_run[0],
+            run_id_hi=current_run[1],
+            sequence_id=sequence_id,
+            model_step=int(record["model_step"]),
+            token_start=int(record["token_start"]),
+            token_count=int(record["token_count"]),
+            token_stride=int(record["token_stride"]),
+            cadence=int(record["cadence"]),
+            event_type=int(record["event_type"]),
+            model_id_hash=bytes.fromhex(str(record["model_id_hash"])),
+            sampler_config_hash=bytes.fromhex(str(record["sampler_config_hash"])),
+            input_context_tip=bytes.fromhex(str(record["input_context_tip"])),
+            output_token_hash=bytes.fromhex(str(record["output_token_hash"])),
+            sampling_metadata_hash=bytes.fromhex(str(record["sampling_metadata_hash"])),
+            tool_call_payload_hash=bytes.fromhex(str(record["tool_call_payload_hash"])),
+            runtime_policy_hash=bytes.fromhex(str(record["runtime_policy_hash"])),
+        )
         digest = bytes.fromhex(str(record["digest"]))
+        if event.digest() != digest:
+            raise ValueError("canonical event digest mismatch")
+        session_id = record.get("session_id")
+        request_id = record.get("request_id")
+        if session_id is not None or request_id is not None:
+            if session_id is None or request_id is None:
+                raise ValueError("incomplete transcript identity")
+            current_identity = (str(session_id), str(request_id))
+            if identity is None:
+                identity = current_identity
+                if stable_run_id(*identity) != current_run:
+                    raise ValueError("run id does not match session/request identity")
+            elif current_identity != identity:
+                raise ValueError("transcript identity changed")
+            if int(record["logical_token_index"]) != int(record["token_start"]):
+                raise ValueError("logical token index mismatch")
         expected_root = compute_chain_root(
             domain=int(str(record["domain"]), 16),
             sequence_id=sequence_id,

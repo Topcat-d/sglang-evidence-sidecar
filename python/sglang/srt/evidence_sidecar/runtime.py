@@ -28,13 +28,9 @@ from sglang.srt.evidence_sidecar.abi_v0 import (
     hash_canonical_json,
     hash_token_ids,
     make_record,
+    stable_run_id,
     verify_records,
 )
-
-
-def _stable_u128(value: str) -> tuple[int, int]:
-    digest = hash_bytes(value.encode("utf-8"))
-    return int.from_bytes(digest[:8], "little"), int.from_bytes(digest[8:16], "little")
 
 
 @dataclass(slots=True)
@@ -101,7 +97,7 @@ class EvidenceSink:
             self._chains[request_id] = chain
             return chain
         session_id = str(getattr(req, "session_id", None) or request_id)
-        lo, hi = _stable_u128(f"{session_id}\0{request_id}")
+        lo, hi = stable_run_id(session_id, request_id)
         chain = _RequestChain(
             request_id=request_id,
             session_id=session_id,

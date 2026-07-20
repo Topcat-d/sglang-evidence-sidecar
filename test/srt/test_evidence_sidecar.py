@@ -104,8 +104,30 @@ def test_tamper_is_rejected(tmp_path):
     sink.record_tokens(req, [7], source="decode")
     records = sink.records_for(req.rid)
     records[1] = dict(records[1], digest="00" * 32)
-    with pytest.raises(ValueError, match="evidence root mismatch"):
+    with pytest.raises(ValueError, match="canonical event digest mismatch"):
         verify_records(records)
+
+
+def test_visible_event_and_identity_tampering_is_rejected(tmp_path):
+    sink = EvidenceSink(tmp_path)
+    req = FakeReq("visible-tamper-request", "visible-tamper-session")
+    sink.record_tokens(req, [7], source="decode")
+    records = sink.records_for(req.rid)
+
+    event_tamper = [dict(record) for record in records]
+    event_tamper[1]["event_type"] = 99
+    with pytest.raises(ValueError, match="canonical event digest mismatch"):
+        verify_records(event_tamper)
+
+    identity_tamper = [dict(record) for record in records]
+    identity_tamper[0]["session_id"] = "different-session"
+    with pytest.raises(ValueError, match="run id does not match"):
+        verify_records(identity_tamper)
+
+    index_tamper = [dict(record) for record in records]
+    index_tamper[1]["logical_token_index"] = 99
+    with pytest.raises(ValueError, match="logical token index mismatch"):
+        verify_records(index_tamper)
 
 
 def test_closed_chain_rejects_late_token(tmp_path):
