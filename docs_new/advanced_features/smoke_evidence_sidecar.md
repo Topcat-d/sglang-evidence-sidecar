@@ -52,3 +52,8 @@ on the CPU. It does not prove kernel fusion, protected key custody, GPU hardware
 identity, remote attestation, or resistance to a malicious host. The next gate
 replaces CPU root computation with an auxiliary-stream GPU provider while
 retaining the same transcript and verifier semantics.
+
+The standalone CUDA provider and cross-oracle probe live under
+`sgl-kernel/csrc/evidence_sidecar` and
+`benchmark/smoke_evidence_sidecar/verify_gpu_root_probe.py`. Their result is a
+primitive gate only; it must not be cited as SGLang model-overhead evidence.

@@ -221,6 +221,7 @@ work_dirs/
 *.la
 *.a
 *.lib
+*.exp
 
 # Executables
 *.exe
