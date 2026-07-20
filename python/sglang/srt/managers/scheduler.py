@@ -1865,6 +1865,7 @@ class Scheduler(
             enable_overlap=self.enable_overlap,
             enable_overlap_mlx=self.enable_overlap_mlx,
             server_args=self.server_args,
+            ps=self.ps,
             model_config=self.model_config,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             tree_cache=self.tree_cache,

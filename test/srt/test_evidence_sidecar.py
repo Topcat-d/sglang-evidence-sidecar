@@ -6,6 +6,7 @@ import ctypes
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,10 @@ if sys.platform == "win32":
     package_paths = {
         "sglang": python_root / "sglang",
         "sglang.srt": python_root / "sglang" / "srt",
-        "sglang.srt.evidence_sidecar": python_root / "sglang" / "srt" / "evidence_sidecar",
+        "sglang.srt.evidence_sidecar": python_root
+        / "sglang"
+        / "srt"
+        / "evidence_sidecar",
     }
     for name, path in package_paths.items():
         module = types.ModuleType(name)
@@ -27,7 +31,7 @@ from sglang.srt.evidence_sidecar.gpu_provider import (
     RequestStateV0,
     UpdateV0,
 )
-from sglang.srt.evidence_sidecar.runtime import EvidenceSink
+from sglang.srt.evidence_sidecar.runtime import EvidenceSink, is_evidence_owner
 
 
 @dataclass
@@ -55,7 +59,10 @@ def test_interleaved_requests_keep_independent_logical_chains(tmp_path):
     assert verify_records(first_records)["ok"]
     assert verify_records(second_records)["ok"]
     assert [row["token_start"] for row in first_records if row["token_count"]] == [0, 1]
-    assert [row["token_start"] for row in second_records if row["token_count"]] == [0, 1]
+    assert [row["token_start"] for row in second_records if row["token_count"]] == [
+        0,
+        1,
+    ]
     assert first_records[0]["run_id_lo"] != second_records[0]["run_id_lo"]
     assert first_records[0]["request_id"] == "request-a"
     assert first_records[2]["logical_token_index"] == 0
@@ -70,9 +77,10 @@ def test_slot_reuse_does_not_reuse_request_identity(tmp_path):
     sink.close(old, reason="cancelled")
     sink.record_tokens(replacement, [2], source="prefill")
 
-    assert sink.records_for("old-request")[0]["run_id_lo"] != sink.records_for(
-        "replacement-request"
-    )[0]["run_id_lo"]
+    assert (
+        sink.records_for("old-request")[0]["run_id_lo"]
+        != sink.records_for("replacement-request")[0]["run_id_lo"]
+    )
 
 
 def test_tool_call_and_result_are_canonicalized(tmp_path):
@@ -160,6 +168,16 @@ def test_cancel_is_terminal_and_idempotent(tmp_path):
     assert verify_records(records)["ok"]
     assert sum(row["event_type"] == 2 for row in records) == 1
     assert records[-1]["label"] == "run_end:sglang_cancelled_v0"
+
+
+def test_only_attention_parallel_leader_owns_evidence():
+    leader = SimpleNamespace(attn_tp_rank=0, attn_cp_rank=0)
+    tp_replica = SimpleNamespace(attn_tp_rank=1, attn_cp_rank=0)
+    cp_replica = SimpleNamespace(attn_tp_rank=0, attn_cp_rank=1)
+
+    assert is_evidence_owner(leader)
+    assert not is_evidence_owner(tp_replica)
+    assert not is_evidence_owner(cp_replica)
 
 
 def test_gpu_ctypes_layout_matches_c_api():

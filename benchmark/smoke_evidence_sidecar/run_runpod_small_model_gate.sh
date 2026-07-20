@@ -7,6 +7,11 @@ REQUESTS=${REQUESTS:-32}
 CONCURRENCY=${CONCURRENCY:-8}
 MAX_TOKENS=${MAX_TOKENS:-32}
 ROUNDS=${ROUNDS:-5}
+TP_SIZE=${TP_SIZE:-1}
+SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-}
+MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-}
+STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-600}
+TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-qwen25}
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"$ROOT/artifacts/evidence-small-model-$RUN_ID"}
 LIBRARY="$ROOT/benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so"
@@ -49,8 +54,8 @@ fi
 export ARCH
 
 {
-  printf 'run_id=%s\nmodel=%s\narch=%s\nrequests=%s\nconcurrency=%s\nmax_tokens=%s\nrounds=%s\n' \
-    "$RUN_ID" "$MODEL" "$ARCH" "$REQUESTS" "$CONCURRENCY" "$MAX_TOKENS" "$ROUNDS"
+  printf 'run_id=%s\nmodel=%s\narch=%s\nrequests=%s\nconcurrency=%s\nmax_tokens=%s\nrounds=%s\ntp_size=%s\n' \
+    "$RUN_ID" "$MODEL" "$ARCH" "$REQUESTS" "$CONCURRENCY" "$MAX_TOKENS" "$ROUNDS" "$TP_SIZE"
   git rev-parse HEAD
   nvidia-smi --query-gpu=name,uuid,driver_version,memory.total,compute_cap --format=csv,noheader
   nvcc --version
@@ -60,15 +65,29 @@ python -m pip install --no-deps -e python
 benchmark/smoke_evidence_sidecar/build_gpu_root_provider_posix.sh
 python -m pytest test/srt/test_evidence_sidecar.py -q
 
-python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
-  --repo "$ROOT" \
-  --model "$MODEL" \
-  --library "$LIBRARY" \
-  --artifact-dir "$ARTIFACT_ROOT/benchmark" \
-  --requests "$REQUESTS" \
-  --concurrency "$CONCURRENCY" \
-  --max-tokens "$MAX_TOKENS" \
+BENCHMARK_ARGS=(
+  --repo "$ROOT"
+  --model "$MODEL"
+  --library "$LIBRARY"
+  --artifact-dir "$ARTIFACT_ROOT/benchmark"
+  --requests "$REQUESTS"
+  --concurrency "$CONCURRENCY"
+  --max-tokens "$MAX_TOKENS"
   --rounds "$ROUNDS"
+  --tp-size "$TP_SIZE"
+  --startup-timeout "$STARTUP_TIMEOUT"
+)
+if [[ -n "$SERVED_MODEL_NAME" ]]; then
+  BENCHMARK_ARGS+=(--served-model-name "$SERVED_MODEL_NAME")
+fi
+if [[ -n "$MEM_FRACTION_STATIC" ]]; then
+  BENCHMARK_ARGS+=(--mem-fraction-static "$MEM_FRACTION_STATIC")
+fi
+if [[ -n "$TOOL_CALL_PARSER" ]]; then
+  BENCHMARK_ARGS+=(--tool-call-parser "$TOOL_CALL_PARSER")
+fi
+python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
+  "${BENCHMARK_ARGS[@]}"
 
 ARCHIVE="$ARTIFACT_ROOT.tar.gz"
 tar -czf "$ARCHIVE" -C "$(dirname "$ARTIFACT_ROOT")" "$(basename "$ARTIFACT_ROOT")"

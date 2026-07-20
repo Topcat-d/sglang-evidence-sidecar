@@ -8,6 +8,7 @@ from sglang.srt.evidence_sidecar.runtime import (
     evidence_finalize_response,
     evidence_gpu_tokens,
     evidence_tokens,
+    is_evidence_owner,
     get_evidence_sink,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "evidence_finalize_response",
     "evidence_gpu_tokens",
     "evidence_tokens",
+    "is_evidence_owner",
     "get_evidence_sink",
 ]

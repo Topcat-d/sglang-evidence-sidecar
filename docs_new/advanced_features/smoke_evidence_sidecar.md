@@ -71,8 +71,9 @@ PYTHONPATH=python python benchmark/smoke_evidence_sidecar/run_small_model_benchm
 The comparison alternates baseline/evidence server order over five rounds and
 reports sustained completion-token throughput, median latency, p95 latency,
 throughput loss, per-round measurements, and verifier results for every
-evidence-on transcript. A result above one percent throughput loss is reported
-as a failed performance target, not hidden by the correctness result.
+evidence-on transcript. An untimed forced tool exchange also requires parsed
+tool-call and tool-result events. A result above one percent throughput loss is
+reported as a failed performance target, not hidden by the correctness result.
 
 For an ephemeral RunPod created from an SGLang CUDA development image, the
 complete gate is available as one command:
@@ -86,3 +87,8 @@ It detects the GPU architecture, builds the provider, runs focused tests,
 verifies every transcript, and creates a `.tar.gz` artifact containing hardware
 metadata, server logs, transcripts, and `result.json`. Set `ARCH` only when
 automatic compute-capability detection needs to be overridden.
+
+Inkling's multi-GPU preflight and reproducible command are documented in
+`benchmark/smoke_evidence_sidecar/INKLING_VALIDATION.md`. The tensor-parallel
+path records evidence only on each attention-parallel leader so replicated
+scheduler ranks cannot race on a logical transcript.

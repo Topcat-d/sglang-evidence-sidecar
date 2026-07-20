@@ -20,6 +20,7 @@ from sglang.srt.evidence_sidecar import (
     evidence_checkpoint,
     evidence_gpu_tokens,
     evidence_tokens,
+    is_evidence_owner,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import (
@@ -39,6 +40,7 @@ from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.distributed.parallel_state_wrapper import ParallelState
     from sglang.srt.disaggregation.decode_kvcache_offload_manager import (
         DecodeKVCacheOffloadManager,
     )
@@ -73,6 +75,7 @@ class SchedulerBatchResultProcessor:
     enable_overlap: bool
     enable_overlap_mlx: bool
     server_args: ServerArgs
+    ps: ParallelState
     model_config: ModelConfig
     token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator
     tree_cache: BasePrefixCache
@@ -86,6 +89,12 @@ class SchedulerBatchResultProcessor:
     logprob_result_processor: SchedulerLogprobResultProcessor
     output_streamer: SchedulerOutputStreamer
     abort_request: Callable
+
+    @property
+    def records_evidence(self) -> bool:
+        # TP/CP ranks process the same accepted token IDs. A single attention
+        # leader must own each logical transcript and its GPU root.
+        return is_evidence_owner(self.ps)
 
     def process_batch_result_prebuilt(self, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
@@ -227,20 +236,24 @@ class SchedulerBatchResultProcessor:
             evidence_prefill_indices = [
                 index
                 for index, req in enumerate(batch.reqs)
-                if not (
-                        (req.finished() and req.inflight_middle_chunks <= 0)
-                        or req.is_retracted
-                    )
-                    and req.inflight_middle_chunks <= 0
+                if self.records_evidence
+                and not (
+                    (req.finished() and req.inflight_middle_chunks <= 0)
+                    or req.is_retracted
+                )
+                and req.inflight_middle_chunks <= 0
             ]
-            evidence_prefill_reqs = [batch.reqs[index] for index in evidence_prefill_indices]
-            evidence_gpu_tokens(
-                evidence_prefill_reqs,
-                device_next_token_ids,
-                batch_kind="prefill",
-                token_indices=evidence_prefill_indices,
-            )
-            evidence_batch(evidence_prefill_reqs, batch_kind="prefill")
+            evidence_prefill_reqs = [
+                batch.reqs[index] for index in evidence_prefill_indices
+            ]
+            if self.records_evidence:
+                evidence_gpu_tokens(
+                    evidence_prefill_reqs,
+                    device_next_token_ids,
+                    batch_kind="prefill",
+                    token_indices=evidence_prefill_indices,
+                )
+                evidence_batch(evidence_prefill_reqs, batch_kind="prefill")
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
                 if (
                     req.finished() and req.inflight_middle_chunks <= 0
@@ -255,13 +268,15 @@ class SchedulerBatchResultProcessor:
 
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
-                    evidence_tokens(req, [next_token_id], source="prefill")
+                    if self.records_evidence:
+                        evidence_tokens(req, [next_token_id], source="prefill")
 
                     self._maybe_update_reasoning_tokens(req, next_token_id)
 
                     req.update_finish_state()
                     if req.finished():
-                        evidence_checkpoint(req, reason="completed")
+                        if self.records_evidence:
+                            evidence_checkpoint(req, reason="completed")
                         self._maybe_collect_routed_experts(req)
                         self._maybe_collect_indexer_topk(req)
                         release_kv_cache(req, self.tree_cache)
@@ -719,20 +734,25 @@ class SchedulerBatchResultProcessor:
         evidence_decode_indices = [
             index
             for index, req in enumerate(batch.reqs)
-            if not (
-                    (self.enable_overlap or self.enable_overlap_mlx)
-                    and (req.finished() or req.is_retracted)
-                )
+            if self.records_evidence
+            and not (
+                (self.enable_overlap or self.enable_overlap_mlx)
+                and (req.finished() or req.is_retracted)
+            )
         ]
         evidence_decode_reqs = [batch.reqs[index] for index in evidence_decode_indices]
-        if torch.is_tensor(result.next_token_ids) and batch.spec_algorithm.is_none():
-            evidence_gpu_tokens(
-                evidence_decode_reqs,
-                result.next_token_ids,
-                batch_kind="decode",
-                token_indices=evidence_decode_indices,
-            )
-        evidence_batch(evidence_decode_reqs, batch_kind="decode")
+        if self.records_evidence:
+            if (
+                torch.is_tensor(result.next_token_ids)
+                and batch.spec_algorithm.is_none()
+            ):
+                evidence_gpu_tokens(
+                    evidence_decode_reqs,
+                    result.next_token_ids,
+                    batch_kind="decode",
+                    token_indices=evidence_decode_indices,
+                )
+            evidence_batch(evidence_decode_reqs, batch_kind="decode")
         for i, req in enumerate(batch.reqs):
             req: Req
 
@@ -749,13 +769,14 @@ class SchedulerBatchResultProcessor:
             is_spec = not batch.spec_algorithm.is_none()
 
             req.output_ids.extend(next_token_id)
-            evidence_tokens(req, next_token_id, source="decode")
+            if self.records_evidence:
+                evidence_tokens(req, next_token_id, source="decode")
             new_accept_len = len(next_token_id)
 
             self._maybe_update_reasoning_tokens(req, next_token_id)
             req.time_stats.set_last_decode_finish_time()
             req.update_finish_state(new_accept_len)
-            if req.finished():
+            if req.finished() and self.records_evidence:
                 evidence_checkpoint(req, reason="completed")
 
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
