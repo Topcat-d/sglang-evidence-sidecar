@@ -39,9 +39,9 @@ def oracle_root(request: int, requests: int, steps: int) -> tuple[int, int, str]
     token_index = 0
     model_hash = bytes((offset + request) & 0xFF for offset in range(32))
     runtime_hash = bytes((0xA0 + offset + request) & 0xFF for offset in range(32))
-    batch_hash = bytes(0x40 + offset for offset in range(32))
     empty_hash = hash_bytes(b"")
     for step in range(steps):
+        batch_hash = bytes((0x40 + offset + step) & 0xFF for offset in range(32))
         batch = CanonicalEventV0(
             run_id_lo=0x1000 + request,
             run_id_hi=0x2000 + request,
@@ -122,7 +122,10 @@ def main() -> int:
     api_markers: dict[str, str] = {}
     if args.api_probe:
         api_completed = subprocess.run(
-            [str(args.api_probe)], check=True, capture_output=True, text=True
+            [str(args.api_probe), str(args.steps)],
+            check=True,
+            capture_output=True,
+            text=True,
         )
         for line in api_completed.stdout.splitlines():
             fields = line.split(",")

@@ -29,6 +29,7 @@ int main(int argc, char **argv) {
 
     std::vector<RequestStateV0> initial(requests);
     std::vector<UpdateV0> updates(requests);
+    std::vector<UpdateV0> update_steps((size_t)requests * steps);
     std::vector<int64_t> tokens((size_t)requests * steps);
     for (int i = 0; i < requests; ++i) {
         initial[i].run_id_lo = 0x1000ull + (uint64_t)i;
@@ -40,12 +41,21 @@ int main(int argc, char **argv) {
         }
         updates[i].slot = (uint32_t)i;
     }
+    for (int step = 0; step < steps; ++step) {
+        for (int i = 0; i < requests; ++i) {
+            update_steps[(size_t)step * requests + i].slot = (uint32_t)i;
+            for (int j = 0; j < 32; ++j) {
+                update_steps[(size_t)step * requests + i].batch_metadata_hash[j] =
+                    (uint8_t)(0x40 + j + step);
+            }
+        }
+    }
 
     RequestStateV0 *d_states = nullptr;
     UpdateV0 *d_updates = nullptr;
     int64_t *d_tokens = nullptr;
     CUDA_OK(cudaMalloc(&d_states, initial.size() * sizeof(RequestStateV0)));
-    CUDA_OK(cudaMalloc(&d_updates, updates.size() * sizeof(UpdateV0)));
+    CUDA_OK(cudaMalloc(&d_updates, update_steps.size() * sizeof(UpdateV0)));
     CUDA_OK(cudaMalloc(&d_tokens, tokens.size() * sizeof(int64_t)));
     cudaStream_t stream;
     CUDA_OK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
@@ -64,14 +74,15 @@ int main(int argc, char **argv) {
     for (int repeat = 0; repeat < repeats; ++repeat) {
         CUDA_OK(cudaMemcpyAsync(d_states, initial.data(), initial.size() * sizeof(RequestStateV0),
                                 cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_updates, updates.data(), updates.size() * sizeof(UpdateV0),
+        CUDA_OK(cudaMemcpyAsync(d_updates, update_steps.data(), update_steps.size() * sizeof(UpdateV0),
                                 cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_tokens, tokens.data(), tokens.size() * sizeof(int64_t),
                                 cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaEventRecord(start, stream));
         for (int step = 0; step < steps; ++step) {
             sglang_evidence::update_token_roots_v0<<<(requests + 127) / 128, 128, 0, stream>>>(
-                d_states, d_updates, d_tokens + (size_t)step * requests, (uint32_t)requests);
+                d_states, d_updates + (size_t)step * requests,
+                d_tokens + (size_t)step * requests, (uint32_t)requests);
             CUDA_OK(cudaGetLastError());
         }
         CUDA_OK(cudaEventRecord(stop, stream));

@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -17,9 +18,10 @@ static void print_hex(const uint8_t value[32]) {
     for (int i = 0; i < 32; ++i) std::printf("%02x", value[i]);
 }
 
-int main() {
+int main(int argc, char **argv) {
     constexpr uint32_t requests = 4;
-    constexpr uint32_t steps = 16;
+    uint32_t steps = argc > 1 ? (uint32_t)std::atoi(argv[1]) : 16;
+    if (steps == 0) return 2;
     SglangEvidenceContext *context = nullptr;
     CHECK(sglang_evidence_create_v0(requests, requests, &context));
     std::vector<SglangEvidenceUpdateV0> updates(requests);
@@ -42,7 +44,12 @@ int main() {
     CUDA_CHECK(cudaMalloc(&device_tokens, requests * sizeof(*device_tokens)));
     std::vector<int64_t> tokens(requests);
     for (uint32_t step = 0; step < steps; ++step) {
-        for (uint32_t i = 0; i < requests; ++i) tokens[i] = 100000 + step * requests + i;
+        for (uint32_t i = 0; i < requests; ++i) {
+            tokens[i] = 100000 + step * requests + i;
+            for (int j = 0; j < 32; ++j) {
+                updates[i].batch_metadata_hash[j] = (uint8_t)(0x40 + j + step);
+            }
+        }
         CUDA_CHECK(cudaMemcpyAsync(device_tokens, tokens.data(), requests * sizeof(*device_tokens),
                                    cudaMemcpyHostToDevice, producer));
         CHECK(sglang_evidence_update_tokens_v0(
@@ -61,6 +68,7 @@ int main() {
     }
     std::printf("api_probe,producer_stream_wait,1\n");
     std::printf("api_probe,checkpoint_only_export,1\n");
+    std::printf("api_probe,steps,%u\n", steps);
 
     cudaFree(device_tokens);
     cudaStreamDestroy(producer);

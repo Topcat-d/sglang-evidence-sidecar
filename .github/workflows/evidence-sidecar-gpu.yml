@@ -1,0 +1,70 @@
+name: Evidence sidecar GPU validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Small SGLang-supported model
+        required: true
+        default: Qwen/Qwen3-0.6B
+      cuda_arch:
+        description: nvcc GPU architecture
+        required: true
+        default: sm_80
+      requests:
+        description: Measured request count
+        required: true
+        default: "32"
+      concurrency:
+        description: Concurrent requests
+        required: true
+        default: "8"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 90
+    env:
+      PYTHONPATH: ${{ github.workspace }}/python
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check runner
+        run: |
+          nvidia-smi
+          nvcc --version
+          python --version
+          python -c "import sglang, torch; print(sglang.__file__, torch.__version__, torch.version.cuda)"
+
+      - name: Select source checkout
+        run: python -m pip install --no-deps -e python
+
+      - name: Build GPU provider
+        env:
+          ARCH: ${{ inputs.cuda_arch }}
+        run: benchmark/smoke_evidence_sidecar/build_gpu_root_provider_posix.sh
+
+      - name: Run focused semantic tests
+        run: python -m pytest test/srt/test_evidence_sidecar.py -q
+
+      - name: Run evidence-off/on benchmark
+        run: |
+          python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --model "${{ inputs.model }}" \
+            --library benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so \
+            --artifact-dir artifacts/evidence-small-model \
+            --requests "${{ inputs.requests }}" \
+            --concurrency "${{ inputs.concurrency }}"
+
+      - name: Upload evidence package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-sidecar-small-model-${{ github.run_id }}
+          path: artifacts/evidence-small-model
+          if-no-files-found: warn

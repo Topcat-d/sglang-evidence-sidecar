@@ -40,3 +40,9 @@ staging, records a `tokens_staged` event, and makes the producer wait only for
 that copy. Hashing then continues on the auxiliary stream. The API and direct
 kernel probes now produce identical CPU-oracle roots and export state only at
 checkpoint.
+
+A variable-metadata stress run of 1,024 steps forced four complete wraps of the
+256-entry pinned update ring. All four API roots still matched the independent
+CPU oracle. The direct kernel path measured `54.262783 ms` median and
+`61.132801 ms` p95 across the 1,024 update launches. This is a long-generation
+correctness and bounded-staging result, not a model-throughput measurement.

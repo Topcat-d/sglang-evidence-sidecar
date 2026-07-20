@@ -6,6 +6,8 @@
 #include <cstring>
 #include <new>
 
+constexpr uint32_t kUpdateStagingDepth = 256;
+
 static_assert(sizeof(SglangEvidenceRequestStateV0) == sizeof(sglang_evidence::RequestStateV0));
 static_assert(sizeof(SglangEvidenceUpdateV0) == sizeof(sglang_evidence::UpdateV0));
 
@@ -16,6 +18,9 @@ struct SglangEvidenceContext {
     sglang_evidence::UpdateV0 *updates = nullptr;
     int64_t *token_staging = nullptr;
     sglang_evidence::UpdateV0 *updates_staging = nullptr;
+    cudaEvent_t *updates_staged = nullptr;
+    uint8_t *updates_staging_used = nullptr;
+    uint32_t updates_staging_cursor = 0;
     SglangEvidenceRequestStateV0 *checkpoint_staging = nullptr;
     cudaStream_t stream = nullptr;
     cudaEvent_t producer_ready = nullptr;
@@ -41,7 +46,21 @@ extern "C" int sglang_evidence_create_v0(
     if (error == cudaSuccess) error = cudaMemsetAsync(value->states, 0, max_slots * sizeof(*value->states), value->stream);
     if (error == cudaSuccess) error = cudaMalloc(&value->updates, max_updates * sizeof(*value->updates));
     if (error == cudaSuccess) error = cudaMalloc(&value->token_staging, max_updates * sizeof(*value->token_staging));
-    if (error == cudaSuccess) error = cudaMallocHost(&value->updates_staging, max_updates * sizeof(*value->updates_staging));
+    if (error == cudaSuccess) {
+        error = cudaMallocHost(
+            &value->updates_staging,
+            (size_t)max_updates * kUpdateStagingDepth * sizeof(*value->updates_staging));
+    }
+    if (error == cudaSuccess) {
+        value->updates_staged = new (std::nothrow) cudaEvent_t[kUpdateStagingDepth]();
+        value->updates_staging_used = new (std::nothrow) uint8_t[kUpdateStagingDepth]();
+        if (!value->updates_staged || !value->updates_staging_used) {
+            error = cudaErrorMemoryAllocation;
+        }
+    }
+    for (uint32_t i = 0; i < kUpdateStagingDepth && error == cudaSuccess; ++i) {
+        error = cudaEventCreateWithFlags(&value->updates_staged[i], cudaEventDisableTiming);
+    }
     if (error == cudaSuccess) error = cudaMallocHost(&value->checkpoint_staging, max_slots * sizeof(*value->checkpoint_staging));
     if (error == cudaSuccess) error = cudaStreamSynchronize(value->stream);
     if (error != cudaSuccess) {
@@ -70,14 +89,25 @@ extern "C" int sglang_evidence_update_tokens_v0(
     for (uint32_t i = 0; i < update_count; ++i) {
         if (updates[i].slot >= context->max_slots) return (int)cudaErrorInvalidValue;
     }
-    std::memcpy(context->updates_staging, updates, update_count * sizeof(*updates));
+    uint32_t staging_index = context->updates_staging_cursor++ % kUpdateStagingDepth;
+    if (context->updates_staging_used[staging_index]) {
+        cudaError_t staging_error = cudaEventSynchronize(context->updates_staged[staging_index]);
+        if (staging_error != cudaSuccess) return (int)staging_error;
+    }
+    sglang_evidence::UpdateV0 *staging =
+        context->updates_staging + (size_t)staging_index * context->max_updates;
+    std::memcpy(staging, updates, update_count * sizeof(*updates));
     cudaStream_t producer = reinterpret_cast<cudaStream_t>(producer_stream);
     cudaError_t error = cudaEventRecord(context->producer_ready, producer);
     if (error == cudaSuccess) error = cudaStreamWaitEvent(context->stream, context->producer_ready, 0);
     if (error == cudaSuccess) {
-        error = cudaMemcpyAsync(context->updates, context->updates_staging,
+        error = cudaMemcpyAsync(context->updates, staging,
                                 update_count * sizeof(*context->updates),
                                 cudaMemcpyHostToDevice, context->stream);
+    }
+    if (error == cudaSuccess) {
+        error = cudaEventRecord(context->updates_staged[staging_index], context->stream);
+        context->updates_staging_used[staging_index] = 1;
     }
     if (error == cudaSuccess) {
         error = cudaMemcpyAsync(context->token_staging, device_token_ids,
@@ -127,6 +157,13 @@ extern "C" void sglang_evidence_destroy_v0(SglangEvidenceContext *context) {
     if (context->stream) cudaStreamSynchronize(context->stream);
     if (context->checkpoint_staging) cudaFreeHost(context->checkpoint_staging);
     if (context->updates_staging) cudaFreeHost(context->updates_staging);
+    if (context->updates_staged) {
+        for (uint32_t i = 0; i < kUpdateStagingDepth; ++i) {
+            if (context->updates_staged[i]) cudaEventDestroy(context->updates_staged[i]);
+        }
+    }
+    delete[] context->updates_staged;
+    delete[] context->updates_staging_used;
     if (context->updates) cudaFree(context->updates);
     if (context->token_staging) cudaFree(context->token_staging);
     if (context->states) cudaFree(context->states);
