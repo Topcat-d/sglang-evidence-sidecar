@@ -61,6 +61,7 @@ from sglang.srt.entrypoints.openai.utils import (
 from sglang.srt.environ import envs
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
+from sglang.srt.evidence_sidecar import evidence_finalize_response
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import (
     get_json_schema_constraint,
@@ -1549,6 +1550,21 @@ class OpenAIServingChat(OpenAIServingBase):
             # NOTE: content should not be None but empty string to make sure retokenize consistency.
             reasoning_text, tool_calls = self._get_parsed_response_fields(
                 reasoning_text, tool_calls
+            )
+
+            evidence_finalize_response(
+                str(ret_item["meta_info"]["id"]),
+                tool_calls=(
+                    [
+                        call.model_dump(mode="json")
+                        if hasattr(call, "model_dump")
+                        else dict(call)
+                        for call in tool_calls
+                    ]
+                    if tool_calls
+                    else None
+                ),
+                reason=(finish_reason or {}).get("type", "completed"),
             )
 
             choice_data = ChatCompletionResponseChoice(

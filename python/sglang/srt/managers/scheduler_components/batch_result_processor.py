@@ -15,6 +15,11 @@ import torch
 
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
+from sglang.srt.evidence_sidecar import (
+    evidence_batch,
+    evidence_checkpoint,
+    evidence_tokens,
+)
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import (
     FINISH_ABORT,
@@ -217,6 +222,18 @@ class SchedulerBatchResultProcessor:
             # Check finish conditions
             logprob_pt = 0
 
+            evidence_batch(
+                [
+                    req
+                    for req in batch.reqs
+                    if not (
+                        (req.finished() and req.inflight_middle_chunks <= 0)
+                        or req.is_retracted
+                    )
+                    and req.inflight_middle_chunks <= 0
+                ],
+                batch_kind="prefill",
+            )
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
                 if (
                     req.finished() and req.inflight_middle_chunks <= 0
@@ -231,11 +248,13 @@ class SchedulerBatchResultProcessor:
 
                     # req output_ids are set here
                     req.output_ids.append(next_token_id)
+                    evidence_tokens(req, [next_token_id], source="prefill")
 
                     self._maybe_update_reasoning_tokens(req, next_token_id)
 
                     req.update_finish_state()
                     if req.finished():
+                        evidence_checkpoint(req, reason="completed")
                         self._maybe_collect_routed_experts(req)
                         self._maybe_collect_indexer_topk(req)
                         release_kv_cache(req, self.tree_cache)
@@ -690,6 +709,17 @@ class SchedulerBatchResultProcessor:
 
         self.token_to_kv_pool_allocator.free_group_begin()
 
+        evidence_batch(
+            [
+                req
+                for req in batch.reqs
+                if not (
+                    (self.enable_overlap or self.enable_overlap_mlx)
+                    and (req.finished() or req.is_retracted)
+                )
+            ],
+            batch_kind="decode",
+        )
         for i, req in enumerate(batch.reqs):
             req: Req
 
@@ -706,11 +736,14 @@ class SchedulerBatchResultProcessor:
             is_spec = not batch.spec_algorithm.is_none()
 
             req.output_ids.extend(next_token_id)
+            evidence_tokens(req, next_token_id, source="decode")
             new_accept_len = len(next_token_id)
 
             self._maybe_update_reasoning_tokens(req, next_token_id)
             req.time_stats.set_last_decode_finish_time()
             req.update_finish_state(new_accept_len)
+            if req.finished():
+                evidence_checkpoint(req, reason="completed")
 
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
 
