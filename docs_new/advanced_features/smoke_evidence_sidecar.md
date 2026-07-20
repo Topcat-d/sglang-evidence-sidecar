@@ -48,11 +48,11 @@ It does not establish model decode overhead or GPU evidence-root performance.
 ## Trust Boundary
 
 This phase proves that scheduler-owned token events can be committed into a
-continuous, independently verifiable transcript. Roots are currently computed
-on the CPU. It does not prove kernel fusion, protected key custody, GPU hardware
-identity, remote attestation, or resistance to a malicious host. The next gate
-replaces CPU root computation with an auxiliary-stream GPU provider while
-retaining the same transcript and verifier semantics.
+continuous, independently verifiable transcript. The optional provider extends
+the evidence root on an auxiliary GPU stream and checks exported checkpoint
+state against the semantic CPU transcript. It does not prove kernel fusion,
+protected key custody, GPU hardware identity, remote attestation, or resistance
+to a malicious host.
 
 The standalone CUDA provider and cross-oracle probe live under
 `sgl-kernel/csrc/evidence_sidecar` and
@@ -72,3 +72,16 @@ The comparison reports sustained completion-token throughput, median latency,
 p95 latency, throughput loss, and verifier results for every evidence-on
 transcript. A result above one percent throughput loss is reported as a failed
 performance target, not hidden by the correctness result.
+
+For an ephemeral RunPod created from an SGLang CUDA development image, the
+complete gate is available as one command:
+
+```bash
+MODEL=Qwen/Qwen3-0.6B REQUESTS=32 CONCURRENCY=8 \
+  benchmark/smoke_evidence_sidecar/run_runpod_small_model_gate.sh
+```
+
+It detects the GPU architecture, builds the provider, runs focused tests,
+verifies every transcript, and creates a `.tar.gz` artifact containing hardware
+metadata, server logs, transcripts, and `result.json`. Set `ARCH` only when
+automatic compute-capability detection needs to be overridden.
