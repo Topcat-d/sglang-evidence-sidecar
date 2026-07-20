@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import types
+import ctypes
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +22,11 @@ if sys.platform == "win32":
         sys.modules.setdefault(name, module)
 
 from sglang.srt.evidence_sidecar.abi_v0 import verify_jsonl, verify_records
+from sglang.srt.evidence_sidecar.gpu_provider import (
+    GpuEvidenceProvider,
+    RequestStateV0,
+    UpdateV0,
+)
 from sglang.srt.evidence_sidecar.runtime import EvidenceSink
 
 
@@ -112,12 +119,16 @@ def test_api_process_resumes_chain_and_binds_tool_call(tmp_path):
     api_sink.append_parsed_tool_calls(
         req.rid, [{"name": "lookup", "arguments": {"query": "weather"}}]
     )
+    api_sink.append_tool_results(
+        req.rid, [{"tool_call_id": "call-1", "content": {"temperature": 72}}]
+    )
     api_sink.finalize_request(req.rid, reason="tool_calls")
 
     records = api_sink.records_for(req.rid)
     assert verify_records(records)["ok"]
     assert records[-2]["label"] == "checkpoint:sglang_tool_calls_v0"
-    assert records[-3]["label"] == "tool_call:sglang_v0"
+    assert records[-4]["label"] == "tool_call:sglang_v0"
+    assert records[-3]["label"] == "tool_result:sglang_v0"
     assert records[-1]["event_type"] == 2
 
 
@@ -149,3 +160,34 @@ def test_cancel_is_terminal_and_idempotent(tmp_path):
     assert verify_records(records)["ok"]
     assert sum(row["event_type"] == 2 for row in records) == 1
     assert records[-1]["label"] == "run_end:sglang_cancelled_v0"
+
+
+def test_gpu_ctypes_layout_matches_c_api():
+    assert ctypes.sizeof(RequestStateV0) == 136
+    assert ctypes.sizeof(UpdateV0) == 40
+
+
+@pytest.mark.skipif(
+    not os.environ.get("SGLANG_EVIDENCE_TEST_LIBRARY"),
+    reason="compiled CUDA evidence library not provided",
+)
+def test_gpu_library_lifecycle():
+    provider = GpuEvidenceProvider(
+        Path(os.environ["SGLANG_EVIDENCE_TEST_LIBRARY"]), max_slots=2, max_updates=2
+    )
+    provider.initialize(
+        0,
+        run_id_lo=1,
+        run_id_hi=2,
+        sequence_id=3,
+        model_step=4,
+        logical_token_index=5,
+        model_id_hash=bytes(range(32)),
+        runtime_policy_hash=bytes(range(32, 64)),
+        root=bytes(range(64, 96)),
+    )
+    state = provider.checkpoint([0])[0]
+    assert (state.sequence_id, state.model_step, state.logical_token_index) == (3, 4, 5)
+    assert state.root == bytes(range(64, 96))
+    provider.release(0)
+    provider.close()

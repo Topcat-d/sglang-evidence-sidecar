@@ -31,3 +31,12 @@ It does not yet prove a SGLang tensor handoff, decode-throughput overhead, CUDA
 Graph behavior, or the under-1% target. The next gate wraps this kernel in a
 runtime C API that waits on the inference producer stream from an auxiliary
 stream and consumes SGLang's device-resident token tensor directly.
+
+The follow-up C API now implements that boundary. Its first probe exposed a
+producer-buffer lifetime race: waiting for the producer event made tokens
+available, but the producer could overwrite the buffer before auxiliary hashing
+finished. The promoted API copies tokens device-to-device into provider-owned
+staging, records a `tokens_staged` event, and makes the producer wait only for
+that copy. Hashing then continues on the auxiliary stream. The API and direct
+kernel probes now produce identical CPU-oracle roots and export state only at
+checkpoint.

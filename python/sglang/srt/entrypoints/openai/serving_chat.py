@@ -1554,6 +1554,11 @@ class OpenAIServingChat(OpenAIServingBase):
 
             evidence_finalize_response(
                 str(ret_item["meta_info"]["id"]),
+                tool_results=[
+                    message.model_dump(mode="json")
+                    for message in (request.messages or [])
+                    if message.role == "tool"
+                ],
                 tool_calls=(
                     [
                         call.model_dump(mode="json")

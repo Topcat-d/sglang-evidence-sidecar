@@ -7,6 +7,7 @@ Smoke Attestation ABI v0 transcripts. It is disabled unless
 ```bash
 export SGLANG_EVIDENCE_SIDECAR_DIR=/var/tmp/sglang-evidence
 export SGLANG_EVIDENCE_MODEL_ID=Qwen/Qwen3-0.6B
+export SGLANG_EVIDENCE_GPU_LIBRARY=$PWD/benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so
 python -m sglang.launch_server --model-path Qwen/Qwen3-0.6B
 ```
 
@@ -57,3 +58,17 @@ The standalone CUDA provider and cross-oracle probe live under
 `sgl-kernel/csrc/evidence_sidecar` and
 `benchmark/smoke_evidence_sidecar/verify_gpu_root_probe.py`. Their result is a
 primitive gate only; it must not be cited as SGLang model-overhead evidence.
+
+On Linux, build the provider and run the evidence-off/on small-model gate:
+
+```bash
+ARCH=sm_80 benchmark/smoke_evidence_sidecar/build_gpu_root_provider_posix.sh
+PYTHONPATH=python python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
+  --library benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so \
+  --artifact-dir artifacts/evidence-small-model
+```
+
+The comparison reports sustained completion-token throughput, median latency,
+p95 latency, throughput loss, and verifier results for every evidence-on
+transcript. A result above one percent throughput loss is reported as a failed
+performance target, not hidden by the correctness result.

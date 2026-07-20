@@ -139,8 +139,12 @@ class EvidenceSink:
             event_type=event_type,
             model_id_hash=hash_bytes(chain.model_id.encode("utf-8")),
             output_token_hash=hash_token_ids(tokens),
-            sampling_metadata_hash=hash_canonical_json(sampling_metadata),
-            tool_call_payload_hash=hash_canonical_json(tool_payload),
+            sampling_metadata_hash=(
+                ZERO_ROOT if sampling_metadata is None else hash_canonical_json(sampling_metadata)
+            ),
+            tool_call_payload_hash=(
+                ZERO_ROOT if tool_payload is None else hash_canonical_json(tool_payload)
+            ),
             runtime_policy_hash=hash_canonical_json(
                 {"runtime": "sglang", "abi": 0, "request_id": chain.request_id}
             ),
@@ -203,7 +207,7 @@ class EvidenceSink:
                 )
                 chain.logical_token_index += 1
 
-    def checkpoint(self, req: Any, *, reason: str) -> None:
+    def checkpoint(self, req: Any, *, reason: str, gpu_root: Optional[str] = None) -> None:
         with self._lock:
             chain = self._chain(req)
             self._emit(
@@ -211,8 +215,10 @@ class EvidenceSink:
                 f"checkpoint:sglang_{reason}_v0",
                 EVENT_CHECKPOINT,
                 CADENCE_ADAPTIVE_CHECKPOINT,
-                sampling_metadata={"reason": reason},
+                sampling_metadata={"gpu_root": gpu_root, "reason": reason},
             )
+            if gpu_root is not None:
+                chain.records[-1]["gpu_evidence_root"] = gpu_root
             self._flush(chain)
 
     def tool_call(self, req: Any, tool_call: Mapping[str, object]) -> None:
@@ -258,6 +264,13 @@ class EvidenceSink:
         for tool_call in tool_calls:
             self.tool_call(req, tool_call)
 
+    def append_tool_results(
+        self, request_id: str, tool_results: Iterable[Mapping[str, object]]
+    ) -> None:
+        req = _RequestIdentity(rid=request_id)
+        for tool_result in tool_results:
+            self.tool_result(req, tool_result)
+
     def finalize_request(self, request_id: str, *, reason: str = "completed") -> None:
         self.close(_RequestIdentity(rid=request_id), reason=reason)
 
@@ -270,6 +283,7 @@ class _RequestIdentity:
 
 _configured_output = os.environ.get("SGLANG_EVIDENCE_SIDECAR_DIR")
 _configured_model = os.environ.get("SGLANG_EVIDENCE_MODEL_ID", "unknown")
+_configured_gpu_library = os.environ.get("SGLANG_EVIDENCE_GPU_LIBRARY")
 _sink: Optional[EvidenceSink] = None
 _sink_lock = threading.Lock()
 
@@ -299,7 +313,8 @@ def evidence_tokens(req: Any, token_ids: Iterable[int], *, source: str) -> None:
 def evidence_checkpoint(req: Any, *, reason: str) -> None:
     sink = get_evidence_sink()
     if sink is not None:
-        sink.checkpoint(req, reason=reason)
+        gpu_root = evidence_gpu_checkpoint(req)
+        sink.checkpoint(req, reason=reason, gpu_root=gpu_root)
 
 
 def evidence_finish(req: Any, *, reason: str) -> None:
@@ -314,15 +329,122 @@ def evidence_cancel(req: Any) -> None:
         sink.cancel(req)
 
 
+class _GpuRuntime:
+    def __init__(self, library: Path) -> None:
+        from sglang.srt.evidence_sidecar.gpu_provider import GpuEvidenceProvider
+
+        self.provider = GpuEvidenceProvider(library, max_slots=4096, max_updates=2048)
+        self.slots: dict[str, int] = {}
+        self.free_slots = list(reversed(range(4096)))
+
+    def _slot(self, sink: EvidenceSink, req: Any) -> int:
+        request_id = str(req.rid)
+        if request_id in self.slots:
+            return self.slots[request_id]
+        if not self.free_slots:
+            raise RuntimeError("GPU evidence request slots exhausted")
+        chain = sink._chain(req)
+        slot = self.free_slots.pop()
+        self.provider.initialize(
+            slot,
+            run_id_lo=chain.run_id_lo,
+            run_id_hi=chain.run_id_hi,
+            sequence_id=chain.sequence_id,
+            model_step=chain.model_step,
+            logical_token_index=chain.logical_token_index,
+            model_id_hash=hash_bytes(chain.model_id.encode("utf-8")),
+            runtime_policy_hash=hash_canonical_json(
+                {"runtime": "sglang", "abi": 0, "request_id": request_id}
+            ),
+            root=chain.prev_tip,
+        )
+        self.slots[request_id] = slot
+        return slot
+
+    def update(self, sink: EvidenceSink, reqs: list[Any], token_tensor, *, batch_kind: str) -> None:
+        members = [str(req.rid) for req in reqs]
+        metadata_hash = hash_canonical_json({"batch_kind": batch_kind, "members": members})
+        rows = [(self._slot(sink, req), metadata_hash) for req in reqs]
+        self.provider.update(rows, token_tensor)
+
+    def checkpoint(self, sink: EvidenceSink, req: Any) -> str:
+        request_id = str(req.rid)
+        slot = self.slots.get(request_id)
+        if slot is None:
+            raise RuntimeError("GPU evidence checkpoint has no request slot")
+        state = self.provider.checkpoint([slot])[0]
+        chain = sink._chain(req)
+        expected = (
+            chain.sequence_id,
+            chain.model_step,
+            chain.logical_token_index,
+            chain.prev_tip,
+        )
+        actual = (
+            state.sequence_id,
+            state.model_step,
+            state.logical_token_index,
+            state.root,
+        )
+        if actual != expected:
+            raise RuntimeError("GPU evidence checkpoint disagrees with CPU transcript state")
+        self.provider.release(slot)
+        del self.slots[request_id]
+        self.free_slots.append(slot)
+        return state.root.hex()
+
+
+_gpu_runtime: Optional[_GpuRuntime] = None
+_gpu_lock = threading.Lock()
+
+
+def _get_gpu_runtime() -> Optional[_GpuRuntime]:
+    global _gpu_runtime
+    if not _configured_gpu_library:
+        return None
+    with _gpu_lock:
+        if _gpu_runtime is None:
+            _gpu_runtime = _GpuRuntime(Path(_configured_gpu_library))
+    return _gpu_runtime
+
+
+def evidence_gpu_tokens(
+    reqs: Iterable[Any], token_tensor, *, batch_kind: str,
+    token_indices: Optional[Iterable[int]] = None,
+) -> None:
+    sink = get_evidence_sink()
+    runtime = _get_gpu_runtime()
+    values = list(reqs)
+    if sink is not None and runtime is not None and values:
+        indices = list(token_indices) if token_indices is not None else None
+        if indices is not None:
+            import torch
+
+            index_tensor = torch.tensor(indices, dtype=torch.int64, device=token_tensor.device)
+            token_tensor = token_tensor.index_select(0, index_tensor)
+        runtime.update(sink, values, token_tensor, batch_kind=batch_kind)
+
+
+def evidence_gpu_checkpoint(req: Any) -> Optional[str]:
+    sink = get_evidence_sink()
+    runtime = _get_gpu_runtime()
+    if sink is None or runtime is None:
+        return None
+    return runtime.checkpoint(sink, req)
+
+
 def evidence_finalize_response(
     request_id: str,
     *,
     tool_calls: Optional[Iterable[Mapping[str, object]]] = None,
+    tool_results: Optional[Iterable[Mapping[str, object]]] = None,
     reason: str = "completed",
 ) -> None:
     sink = get_evidence_sink()
     if sink is None:
         return
+    if tool_results:
+        sink.append_tool_results(request_id, tool_results)
     if tool_calls:
         sink.append_parsed_tool_calls(request_id, tool_calls)
     sink.finalize_request(request_id, reason=reason)

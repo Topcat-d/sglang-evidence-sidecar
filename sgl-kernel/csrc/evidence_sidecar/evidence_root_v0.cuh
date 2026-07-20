@@ -9,7 +9,7 @@ constexpr uint64_t kEventMagic = 0x304744454b4f4d53ull;
 constexpr uint64_t kChainMagic = 0x305645454b4f4d53ull;
 constexpr uint64_t kEvidenceDomain = 0x54494c455f524f4full;
 
-struct alignas(16) RequestStateV0 {
+struct RequestStateV0 {
     uint64_t run_id_lo;
     uint64_t run_id_hi;
     uint64_t sequence_id;
@@ -176,13 +176,13 @@ __global__ void update_token_roots_v0(
     canonical_digest(state, 1, 3, 0, 0, empty_hash,
                      updates[index].batch_metadata_hash, digest);
     advance_root(state, digest);
+    ++state.model_step;
 
     store_le64(token_bytes, (uint64_t)token_ids[index]);
     sha256(token_bytes, 8, output_hash);
     canonical_digest(state, 3, 4, 1, 1, output_hash, zero, digest);
     advance_root(state, digest);
     ++state.logical_token_index;
-    ++state.model_step;
 }
 
 }  // namespace sglang_evidence

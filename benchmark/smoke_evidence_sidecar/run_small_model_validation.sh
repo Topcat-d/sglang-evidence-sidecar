@@ -9,6 +9,7 @@ RESULT=${RESULT:-"$PWD/small-model-response.json"}
 export PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 export SGLANG_EVIDENCE_SIDECAR_DIR="$OUT"
 export SGLANG_EVIDENCE_MODEL_ID="$MODEL"
+export SGLANG_EVIDENCE_GPU_LIBRARY=${SGLANG_EVIDENCE_GPU_LIBRARY:-"$PWD/benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so"}
 
 python -m sglang.launch_server --model-path "$MODEL" --host 127.0.0.1 --port "$PORT" &
 SERVER_PID=$!

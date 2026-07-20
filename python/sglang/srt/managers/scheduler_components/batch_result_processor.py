@@ -18,6 +18,7 @@ from sglang.srt.environ import envs
 from sglang.srt.evidence_sidecar import (
     evidence_batch,
     evidence_checkpoint,
+    evidence_gpu_tokens,
     evidence_tokens,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -212,6 +213,7 @@ class SchedulerBatchResultProcessor:
             )
 
             # Move next_token_ids and logprobs to cpu
+            device_next_token_ids = next_token_ids
             next_token_ids = next_token_ids.tolist()
             self.move_logprobs_to_cpu(batch=batch, logits_output=logits_output)
 
@@ -222,18 +224,23 @@ class SchedulerBatchResultProcessor:
             # Check finish conditions
             logprob_pt = 0
 
-            evidence_batch(
-                [
-                    req
-                    for req in batch.reqs
-                    if not (
+            evidence_prefill_indices = [
+                index
+                for index, req in enumerate(batch.reqs)
+                if not (
                         (req.finished() and req.inflight_middle_chunks <= 0)
                         or req.is_retracted
                     )
                     and req.inflight_middle_chunks <= 0
-                ],
+            ]
+            evidence_prefill_reqs = [batch.reqs[index] for index in evidence_prefill_indices]
+            evidence_gpu_tokens(
+                evidence_prefill_reqs,
+                device_next_token_ids,
                 batch_kind="prefill",
+                token_indices=evidence_prefill_indices,
             )
+            evidence_batch(evidence_prefill_reqs, batch_kind="prefill")
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
                 if (
                     req.finished() and req.inflight_middle_chunks <= 0
@@ -709,17 +716,23 @@ class SchedulerBatchResultProcessor:
 
         self.token_to_kv_pool_allocator.free_group_begin()
 
-        evidence_batch(
-            [
-                req
-                for req in batch.reqs
-                if not (
+        evidence_decode_indices = [
+            index
+            for index, req in enumerate(batch.reqs)
+            if not (
                     (self.enable_overlap or self.enable_overlap_mlx)
                     and (req.finished() or req.is_retracted)
                 )
-            ],
-            batch_kind="decode",
-        )
+        ]
+        evidence_decode_reqs = [batch.reqs[index] for index in evidence_decode_indices]
+        if torch.is_tensor(result.next_token_ids) and batch.spec_algorithm.is_none():
+            evidence_gpu_tokens(
+                evidence_decode_reqs,
+                result.next_token_ids,
+                batch_kind="decode",
+                token_indices=evidence_decode_indices,
+            )
+        evidence_batch(evidence_decode_reqs, batch_kind="decode")
         for i, req in enumerate(batch.reqs):
             req: Req
 

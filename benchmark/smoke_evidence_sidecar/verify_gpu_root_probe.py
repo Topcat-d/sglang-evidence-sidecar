@@ -69,7 +69,7 @@ def oracle_root(request: int, requests: int, steps: int) -> tuple[int, int, str]
             run_id_lo=0x1000 + request,
             run_id_hi=0x2000 + request,
             sequence_id=sequence,
-            model_step=step,
+            model_step=step + 1,
             token_start=token_index,
             token_count=1,
             token_stride=1,
@@ -93,6 +93,7 @@ def oracle_root(request: int, requests: int, steps: int) -> tuple[int, int, str]
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--probe", type=Path, required=True)
+    parser.add_argument("--api-probe", type=Path)
     parser.add_argument("--requests", type=int, default=4)
     parser.add_argument("--steps", type=int, default=16)
     parser.add_argument("--repeats", type=int, default=20)
@@ -117,6 +118,23 @@ def main() -> int:
         for request in range(args.requests)
     }
     mismatches = [request for request in expected if roots.get(request) != expected[request]]
+    api_roots: dict[int, tuple[int, int, str]] = {}
+    api_markers: dict[str, str] = {}
+    if args.api_probe:
+        api_completed = subprocess.run(
+            [str(args.api_probe)], check=True, capture_output=True, text=True
+        )
+        for line in api_completed.stdout.splitlines():
+            fields = line.split(",")
+            if fields[0] == "api_root":
+                api_roots[int(fields[1])] = (int(fields[2]), int(fields[3]), fields[4])
+            elif fields[0] == "api_probe":
+                api_markers[fields[1]] = fields[2]
+        mismatches.extend(
+            request
+            for request in expected
+            if api_roots.get(request) != expected[request]
+        )
     result = {
         "schema": "sglang_gpu_evidence_root_probe_v0",
         "ok": not mismatches,
@@ -126,6 +144,8 @@ def main() -> int:
         "mismatches": mismatches,
         "metrics": metrics,
         "roots": {str(key): value[2] for key, value in roots.items()},
+        "api_roots": {str(key): value[2] for key, value in api_roots.items()},
+        "api_markers": api_markers,
     }
     encoded = json.dumps(result, sort_keys=True)
     print(encoded)
