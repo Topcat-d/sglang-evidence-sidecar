@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -34,6 +35,23 @@ def wait_ready(port: int, process: subprocess.Popen, timeout: float) -> None:
         except (OSError, urllib.error.URLError):
             time.sleep(1)
     raise TimeoutError("SGLang server did not become healthy")
+
+
+def stop_server(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=10)
 
 
 def request_once(port: int, model: str, index: int, max_tokens: int) -> dict[str, object]:
@@ -66,7 +84,9 @@ def request_once(port: int, model: str, index: int, max_tokens: int) -> dict[str
     }
 
 
-def run_mode(args, mode: str, evidence_dir: Path, log_path: Path) -> dict[str, object]:
+def run_mode(
+    args, mode: str, round_index: int, evidence_dir: Path, log_path: Path
+) -> dict[str, object]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(args.repo / "python") + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("SGLANG_EVIDENCE_SIDECAR_DIR", None)
@@ -94,6 +114,7 @@ def run_mode(args, mode: str, evidence_dir: Path, log_path: Path) -> dict[str, o
             stdout=log,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         try:
             wait_ready(args.port, process, args.startup_timeout)
@@ -108,12 +129,7 @@ def run_mode(args, mode: str, evidence_dir: Path, log_path: Path) -> dict[str, o
                 rows = [future.result() for future in futures]
             elapsed = time.perf_counter() - started
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+            stop_server(process)
     latencies = [float(row["latency_ms"]) for row in rows]
     tokens = sum(int(row["completion_tokens"]) for row in rows)
     transcripts = []
@@ -126,6 +142,7 @@ def run_mode(args, mode: str, evidence_dir: Path, log_path: Path) -> dict[str, o
             )
     return {
         "mode": mode,
+        "round": round_index,
         "requests": len(rows),
         "completion_tokens": tokens,
         "elapsed_s": elapsed,
@@ -145,6 +162,7 @@ def main() -> int:
     parser.add_argument("--requests", type=int, default=32)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=4)
+    parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--port", type=int, default=30000)
     parser.add_argument("--startup-timeout", type=float, default=600)
@@ -152,22 +170,82 @@ def main() -> int:
     args.repo = args.repo.resolve()
     args.library = args.library.resolve()
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
-    evidence_dir = args.artifact_dir / "transcripts"
-    evidence_dir.mkdir(exist_ok=True)
+    if args.rounds < 2:
+        parser.error("--rounds must be at least 2 to reduce server-order bias")
+    if args.requests < args.concurrency:
+        parser.error("--requests must be greater than or equal to --concurrency")
 
-    baseline = run_mode(args, "baseline", evidence_dir, args.artifact_dir / "baseline.log")
-    evidence = run_mode(args, "evidence", evidence_dir, args.artifact_dir / "evidence.log")
-    throughput_loss = (
-        (float(baseline["throughput_tokens_s"]) - float(evidence["throughput_tokens_s"]))
-        / float(baseline["throughput_tokens_s"])
-        * 100
-    )
+    runs: list[dict[str, object]] = []
+    for round_index in range(args.rounds):
+        order = ("baseline", "evidence") if round_index % 2 == 0 else ("evidence", "baseline")
+        for mode in order:
+            run_dir = args.artifact_dir / f"round-{round_index:02d}" / mode
+            evidence_dir = run_dir / "transcripts"
+            evidence_dir.mkdir(parents=True, exist_ok=False)
+            runs.append(
+                run_mode(
+                    args,
+                    mode,
+                    round_index,
+                    evidence_dir,
+                    run_dir / "server.log",
+                )
+            )
+
+    def aggregate(mode: str) -> dict[str, object]:
+        selected = [run for run in runs if run["mode"] == mode]
+        throughputs = [float(run["throughput_tokens_s"]) for run in selected]
+        medians = [float(run["latency_median_ms"]) for run in selected]
+        p95s = [float(run["latency_p95_ms"]) for run in selected]
+        return {
+            "mode": mode,
+            "rounds": len(selected),
+            "throughput_tokens_s_median": statistics.median(throughputs),
+            "throughput_tokens_s_p95": percentile(throughputs, 0.95),
+            "latency_median_ms_median": statistics.median(medians),
+            "latency_p95_ms_median": statistics.median(p95s),
+        }
+
+    baseline = aggregate("baseline")
+    evidence = aggregate("evidence")
+    paired_losses = []
+    for round_index in range(args.rounds):
+        by_mode = {
+            str(run["mode"]): run
+            for run in runs
+            if int(run["round"]) == round_index
+        }
+        baseline_throughput = float(by_mode["baseline"]["throughput_tokens_s"])
+        evidence_throughput = float(by_mode["evidence"]["throughput_tokens_s"])
+        paired_losses.append(
+            {
+                "round": round_index,
+                "throughput_loss_percent": (
+                    (baseline_throughput - evidence_throughput)
+                    / baseline_throughput
+                    * 100
+                ),
+            }
+        )
+    loss_values = [float(row["throughput_loss_percent"]) for row in paired_losses]
+    throughput_loss = statistics.median(loss_values)
     result = {
-        "schema": "sglang_evidence_small_model_benchmark_v0",
+        "schema": "sglang_evidence_small_model_benchmark_v1",
         "model": args.model,
+        "measurement": {
+            "rounds": args.rounds,
+            "requests_per_mode_per_round": args.requests,
+            "concurrency": args.concurrency,
+            "warmup_requests": args.warmup,
+            "max_tokens": args.max_tokens,
+            "order": "alternating baseline/evidence by round",
+        },
         "baseline": baseline,
         "evidence": evidence,
+        "runs": runs,
+        "paired_throughput_losses": paired_losses,
         "throughput_loss_percent": throughput_loss,
+        "throughput_loss_p95_percent": percentile(loss_values, 0.95),
         "under_one_percent_target": throughput_loss < 1.0,
         "trust_boundary": "runtime-adjacent GPU roots; not kernel fusion or hardware attestation",
     }

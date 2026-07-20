@@ -68,10 +68,11 @@ PYTHONPATH=python python benchmark/smoke_evidence_sidecar/run_small_model_benchm
   --artifact-dir artifacts/evidence-small-model
 ```
 
-The comparison reports sustained completion-token throughput, median latency,
-p95 latency, throughput loss, and verifier results for every evidence-on
-transcript. A result above one percent throughput loss is reported as a failed
-performance target, not hidden by the correctness result.
+The comparison alternates baseline/evidence server order over five rounds and
+reports sustained completion-token throughput, median latency, p95 latency,
+throughput loss, per-round measurements, and verifier results for every
+evidence-on transcript. A result above one percent throughput loss is reported
+as a failed performance target, not hidden by the correctness result.
 
 For an ephemeral RunPod created from an SGLang CUDA development image, the
 complete gate is available as one command:

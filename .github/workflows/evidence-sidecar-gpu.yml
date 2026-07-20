@@ -19,6 +19,10 @@ on:
         description: Concurrent requests
         required: true
         default: "8"
+      rounds:
+        description: Alternating evidence-off/on measurement rounds
+        required: true
+        default: "5"
 
 permissions:
   contents: read
@@ -59,7 +63,8 @@ jobs:
             --library benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so \
             --artifact-dir artifacts/evidence-small-model \
             --requests "${{ inputs.requests }}" \
-            --concurrency "${{ inputs.concurrency }}"
+            --concurrency "${{ inputs.concurrency }}" \
+            --rounds "${{ inputs.rounds }}"
 
       - name: Upload evidence package
         if: always()

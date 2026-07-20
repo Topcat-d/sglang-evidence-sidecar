@@ -6,6 +6,7 @@ MODEL=${MODEL:-Qwen/Qwen3-0.6B}
 REQUESTS=${REQUESTS:-32}
 CONCURRENCY=${CONCURRENCY:-8}
 MAX_TOKENS=${MAX_TOKENS:-32}
+ROUNDS=${ROUNDS:-5}
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"$ROOT/artifacts/evidence-small-model-$RUN_ID"}
 LIBRARY="$ROOT/benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so"
@@ -48,8 +49,8 @@ fi
 export ARCH
 
 {
-  printf 'run_id=%s\nmodel=%s\narch=%s\nrequests=%s\nconcurrency=%s\nmax_tokens=%s\n' \
-    "$RUN_ID" "$MODEL" "$ARCH" "$REQUESTS" "$CONCURRENCY" "$MAX_TOKENS"
+  printf 'run_id=%s\nmodel=%s\narch=%s\nrequests=%s\nconcurrency=%s\nmax_tokens=%s\nrounds=%s\n' \
+    "$RUN_ID" "$MODEL" "$ARCH" "$REQUESTS" "$CONCURRENCY" "$MAX_TOKENS" "$ROUNDS"
   git rev-parse HEAD
   nvidia-smi --query-gpu=name,uuid,driver_version,memory.total,compute_cap --format=csv,noheader
   nvcc --version
@@ -66,7 +67,8 @@ python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
   --artifact-dir "$ARTIFACT_ROOT/benchmark" \
   --requests "$REQUESTS" \
   --concurrency "$CONCURRENCY" \
-  --max-tokens "$MAX_TOKENS"
+  --max-tokens "$MAX_TOKENS" \
+  --rounds "$ROUNDS"
 
 ARCHIVE="$ARTIFACT_ROOT.tar.gz"
 tar -czf "$ARCHIVE" -C "$(dirname "$ARTIFACT_ROOT")" "$(basename "$ARTIFACT_ROOT")"
