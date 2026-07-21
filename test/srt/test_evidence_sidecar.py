@@ -32,6 +32,7 @@ from sglang.srt.evidence_sidecar.gpu_provider import (
     UpdateV0,
 )
 from sglang.srt.evidence_sidecar.runtime import EvidenceSink, is_evidence_owner
+from sglang.srt.evidence_sidecar import runtime as runtime_module
 
 
 @dataclass
@@ -205,6 +206,38 @@ def test_only_attention_parallel_leader_owns_evidence():
 def test_gpu_ctypes_layout_matches_c_api():
     assert ctypes.sizeof(RequestStateV0) == 136
     assert ctypes.sizeof(UpdateV0) == 40
+
+
+def test_gpu_token_boundary_normalizes_cpu_int32_to_cuda_int64(monkeypatch):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the GPU token boundary")
+    captured = {}
+
+    class FakeRuntime:
+        def update(self, sink, reqs, token_tensor, *, batch_kind):
+            captured.update(
+                sink=sink,
+                reqs=reqs,
+                token_tensor=token_tensor,
+                batch_kind=batch_kind,
+            )
+
+    sink = object()
+    monkeypatch.setattr(runtime_module, "get_evidence_sink", lambda: sink)
+    monkeypatch.setattr(runtime_module, "_get_gpu_runtime", FakeRuntime)
+    source = torch.tensor([11, 22, 33], dtype=torch.int32)[::2]
+
+    runtime_module.evidence_gpu_tokens(
+        [FakeReq("first"), FakeReq("second")], source, batch_kind="decode"
+    )
+
+    assert captured["sink"] is sink
+    assert captured["batch_kind"] == "decode"
+    assert captured["token_tensor"].dtype == torch.int64
+    assert captured["token_tensor"].is_cuda
+    assert captured["token_tensor"].is_contiguous()
+    assert captured["token_tensor"].tolist() == [11, 33]
 
 
 @pytest.mark.skipif(

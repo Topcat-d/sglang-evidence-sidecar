@@ -11,7 +11,11 @@ TP_SIZE=${TP_SIZE:-1}
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-}
 MEM_FRACTION_STATIC=${MEM_FRACTION_STATIC:-}
 STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-600}
-TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-qwen25}
+TOOL_CALL_PARSER=${TOOL_CALL_PARSER:-qwen}
+LAUNCHER_SCRIPT=${LAUNCHER_SCRIPT:-}
+ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
+DISABLE_CUDA_GRAPHS=${DISABLE_CUDA_GRAPHS:-false}
+DISABLE_FLASHINFER=${DISABLE_FLASHINFER:-false}
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"$ROOT/artifacts/evidence-small-model-$RUN_ID"}
 LIBRARY="$ROOT/benchmark/smoke_evidence_sidecar/libsglang_evidence_root.so"
@@ -85,6 +89,18 @@ if [[ -n "$MEM_FRACTION_STATIC" ]]; then
 fi
 if [[ -n "$TOOL_CALL_PARSER" ]]; then
   BENCHMARK_ARGS+=(--tool-call-parser "$TOOL_CALL_PARSER")
+fi
+if [[ -n "$LAUNCHER_SCRIPT" ]]; then
+  BENCHMARK_ARGS+=(--launcher-script "$LAUNCHER_SCRIPT")
+fi
+if [[ -n "$ATTENTION_BACKEND" ]]; then
+  BENCHMARK_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
+fi
+if [[ "$DISABLE_CUDA_GRAPHS" == true ]]; then
+  BENCHMARK_ARGS+=(--disable-cuda-graphs)
+fi
+if [[ "$DISABLE_FLASHINFER" == true ]]; then
+  BENCHMARK_ARGS+=(--disable-flashinfer)
 fi
 python benchmark/smoke_evidence_sidecar/run_small_model_benchmark.py \
   "${BENCHMARK_ARGS[@]}"

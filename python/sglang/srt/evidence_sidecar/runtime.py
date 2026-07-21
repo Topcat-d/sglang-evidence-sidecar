@@ -443,14 +443,20 @@ def evidence_gpu_tokens(
     runtime = _get_gpu_runtime()
     values = list(reqs)
     if sink is not None and runtime is not None and values:
+        import torch
+
         indices = list(token_indices) if token_indices is not None else None
         if indices is not None:
-            import torch
-
             index_tensor = torch.tensor(
                 indices, dtype=torch.int64, device=token_tensor.device
             )
             token_tensor = token_tensor.index_select(0, index_tensor)
+        device = (
+            token_tensor.device
+            if token_tensor.is_cuda
+            else torch.device("cuda", torch.cuda.current_device())
+        )
+        token_tensor = token_tensor.to(device=device, dtype=torch.int64).contiguous()
         runtime.update(sink, values, token_tensor, batch_kind=batch_kind)
 
 

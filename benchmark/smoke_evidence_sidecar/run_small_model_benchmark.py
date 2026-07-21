@@ -167,17 +167,21 @@ def run_mode(
         env["SGLANG_EVIDENCE_SIDECAR_DIR"] = str(evidence_dir)
         env["SGLANG_EVIDENCE_GPU_LIBRARY"] = str(args.library)
         env["SGLANG_EVIDENCE_MODEL_ID"] = args.model
-    command = [
-        sys.executable,
-        "-m",
-        "sglang.launch_server",
+    if args.disable_flashinfer:
+        env["SGLANG_IS_FLASHINFER_AVAILABLE"] = "false"
+    command = [sys.executable]
+    if args.launcher_script:
+        command.append(str(args.launcher_script))
+    else:
+        command.extend(["-m", "sglang.launch_server"])
+    command.extend([
         "--model-path",
         args.model,
         "--host",
         "127.0.0.1",
         "--port",
         str(args.port),
-    ]
+    ])
     if args.tp_size > 1:
         command.extend(["--tp-size", str(args.tp_size)])
     if args.served_model_name:
@@ -186,6 +190,17 @@ def run_mode(
         command.extend(["--mem-fraction-static", str(args.mem_fraction_static)])
     if args.tool_call_parser:
         command.extend(["--tool-call-parser", args.tool_call_parser])
+    if args.attention_backend:
+        command.extend(["--attention-backend", args.attention_backend])
+    if args.disable_cuda_graphs:
+        command.extend(
+            [
+                "--cuda-graph-backend-decode",
+                "disabled",
+                "--cuda-graph-backend-prefill",
+                "disabled",
+            ]
+        )
     api_model = args.served_model_name or args.model
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
@@ -282,9 +297,15 @@ def main() -> int:
     parser.add_argument("--served-model-name")
     parser.add_argument("--mem-fraction-static", type=float)
     parser.add_argument("--tool-call-parser")
+    parser.add_argument("--launcher-script", type=Path)
+    parser.add_argument("--attention-backend")
+    parser.add_argument("--disable-cuda-graphs", action="store_true")
+    parser.add_argument("--disable-flashinfer", action="store_true")
     args = parser.parse_args()
     args.repo = args.repo.resolve()
     args.library = args.library.resolve()
+    if args.launcher_script:
+        args.launcher_script = args.launcher_script.resolve()
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
     if args.rounds < 2:
         parser.error("--rounds must be at least 2 to reduce server-order bias")
@@ -362,6 +383,12 @@ def main() -> int:
             "served_model_name": args.served_model_name or args.model,
             "mem_fraction_static": args.mem_fraction_static,
             "tool_call_parser": args.tool_call_parser,
+            "launcher_script": (
+                str(args.launcher_script) if args.launcher_script else None
+            ),
+            "attention_backend": args.attention_backend,
+            "cuda_graphs_disabled": args.disable_cuda_graphs,
+            "flashinfer_disabled": args.disable_flashinfer,
             "order": "alternating baseline/evidence by round",
         },
         "baseline": baseline,
